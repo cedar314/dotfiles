@@ -1,0 +1,6 @@
+# Copy to $XDG_CONFIG_HOME/git/local.conf (default: ~/.config/git/local.conf).
+# This file remains private and outside the repository.
+[user]
+    name = YOUR NAME
+    email = YOUR EMAIL
+# Configure credential integration locally. Never put tokens here or in Git.

@@ -1,0 +1,25 @@
+# Local overrides, private settings, backups and generated artifacts.
+/local/
+*.local
+*.local.*
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+*.pyc
+backups/
+.dotfiles-download.*/
+node_modules/
+# Never stage authentication or agent runtime state.
+.aws/
+.agents/
+.codex/
+auth.json
+hosts.yml
+auth.ini
+.npmrc
+.docker/
+.ssh/
+*_history
+*.sqlite*

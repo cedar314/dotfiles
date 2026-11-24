@@ -1,0 +1,4 @@
+Place only reviewed, reusable user-authored skills in NAME/SKILL.md here.
+The Codex module links each skill independently to ~/.agents/skills/NAME.
+Do not copy bundled skills, plugin caches, project instructions, or secrets.
+No custom skills were found in the inspected user skill directory.
