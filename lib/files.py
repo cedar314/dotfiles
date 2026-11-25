@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Link management with private journals; never read configuration contents."""
+"""Journal links and guard rollback of generated environment wrappers."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,9 @@ def link(args):
     safe_parents(destination)
     conflict = exists(destination)
     snapshot = destination.lstat() if conflict else None
+    if conflict and args.preserve_existing:
+        print(f'[skipped] existing private configuration retained: {destination}')
+        return 0
     if args.mode != 'apply':
         print(f'[{"conflict" if conflict else "missing"}] {destination} -> {source}')
         return int(args.mode == 'check')
@@ -107,9 +111,16 @@ def rollback(args):
             record = json.loads(manifest.read_text())
             if record['status'] != 'linked':
                 continue
-            destination, source = Path(record['destination']), Path(record['source'])
+            destination = Path(record['destination'])
+            is_file = record.get('kind') == 'file'
+            source = None if is_file else Path(record['source'])
             safe_parents(destination)
-            if not destination.is_symlink() or os.readlink(destination) != str(source):
+            if is_file:
+                unchanged = (destination.is_file() and not destination.is_symlink()
+                             and hashlib.sha256(destination.read_bytes()).hexdigest() == record['sha256'])
+            else:
+                unchanged = destination.is_symlink() and os.readlink(destination) == str(source)
+            if not unchanged:
                 print(f'[failed] changed since setup; left untouched: {destination}')
                 failed = True
                 continue
@@ -122,12 +133,18 @@ def rollback(args):
             if sys.stdin.readline().strip().lower() not in ('y', 'yes'):
                 print(f'[skipped] {destination}')
                 continue
+            generated = destination.read_bytes() if is_file else None
             destination.unlink()
             try:
                 if backup:
                     backup.rename(destination)
             except BaseException:
-                destination.symlink_to(source)
+                if is_file:
+                    with destination.open('xb') as stream:
+                        stream.write(generated)
+                    destination.chmod(0o600)
+                else:
+                    destination.symlink_to(source)
                 raise
             record['status'] = 'restored'
             save(manifest, record)
@@ -140,6 +157,7 @@ def main():
     parser.add_argument('operation', choices=['link', 'rollback'])
     parser.add_argument('--source')
     parser.add_argument('--destination')
+    parser.add_argument('--preserve-existing', action='store_true')
     parser.add_argument('--state', required=True)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--mode', choices=['check', 'dry-run', 'apply'], required=True)

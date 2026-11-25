@@ -26,7 +26,9 @@ if (( ${#packages[@]} )); then
 else
     [[ $family == unknown ]] || status 'already configured' "Docker Engine/Compose packages ($family)"
 fi
-status 'already configured' 'Docker CLI config, daemon settings, group membership and container data left unmanaged'
+local_config "$DOTFILES_ROOT/docker/config.json.example" \
+    "$CONFIG_HOME/docker/config.json" "${DOCKER_CONFIG:-$HOME/.docker}/config.json" || true
+status 'already configured' 'Existing Docker authentication, daemon settings, group membership and container data retained'
 if [[ $MODE != apply ]]; then
     status planned 'Check local service health after installation; offer start only with systemd available'
 elif (( ! ready )); then

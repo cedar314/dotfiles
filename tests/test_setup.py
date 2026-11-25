@@ -32,12 +32,12 @@ class SetupTests(unittest.TestCase):
                         XDG_DATA_HOME=str(self.home / 'data'), XDG_STATE_HOME=str(self.home / 'state'),
                         XDG_CACHE_HOME=str(self.home / 'cache'), PATH=f'{self.bin}:/usr/bin:/bin',
                         TEST_LOG=str(self.log), TEST_CASE='normal')
-        for key in ['CODEX_HOME', 'NVM_DIR', 'NVIM_APPNAME', 'DOCKER_HOST', 'DOCKER_CONTEXT',
+        for key in ['DOTFILES_ENV_READY', 'ZDOTDIR', 'CODEX_HOME', 'NVM_DIR', 'NVIM_APPNAME', 'DOCKER_HOST', 'DOCKER_CONTEXT',
                     'DOCKER_CONFIG', 'GH_CONFIG_DIR', 'NPM_CONFIG_PREFIX']:
             self.env.pop(key, None)
         for name in ['git', 'docker', 'dockerd', 'tmux', 'nvim', 'codex', 'node', 'npm', 'pnpm',
                      'gh', 'wezterm', 'brew', 'apt-get', 'dpkg-query', 'systemctl', 'sudo',
-                     'rg', 'fd', 'cc', 'wl-copy', 'md-to-pdf']:
+                     'rg', 'fd', 'cc', 'wl-copy', 'md-to-pdf', 'zsh']:
             self.mock(name)
 
     def mock(self, name):
@@ -63,6 +63,9 @@ case "${0##*/}" in
         apt-failure) exit 1 ;;
         *) printf '%s\\n' 'Inst newpackage (1.0 Ubuntu)' ;;
       esac
+    elif [[ $TEST_CASE == install-zsh && $* == *' install -- zsh' ]]; then
+      printf '#!/bin/bash\\nexit 0\\n' > "${0%/*}/zsh"
+      chmod +x "${0%/*}/zsh"
     fi ;;
   sudo) [[ $1 != -- ]] || shift; "$@" ;;
   tmux) [[ $1 != -V ]] || printf 'tmux 3.6\\n' ;;
@@ -121,6 +124,153 @@ esac
         self.assertNotIn('git clone', commands)
         self.assertNotIn('npm install', commands)
 
+    def test_unset_xdg_prompts_once_and_reuses_saved_choice(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        chosen = self.home / 'chosen config'
+        result = self.run_setup('codex', 'gh', answers=str(chosen) + '\n')
+        self.assertEqual(result.stderr.count('(Enter for default)'), 1)
+        self.assertTrue((self.home / '.codex/config.toml').is_file())
+        self.assertFalse((self.home / '.config').exists())
+        self.assertTrue((self.home / '.zshenv').is_file())
+        self.assertFalse((self.home / '.zshenv').is_symlink())
+        before = self.snapshot()
+        result = self.run_setup('codex', 'gh')
+        self.assertNotIn('(Enter for default)', result.stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_unset_xdg_enter_uses_standard_default(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        self.run_setup('codex', answers='\n')
+        self.assertTrue((self.home / '.codex/config.toml').is_file())
+
+    def test_unset_xdg_eof_aborts_without_changes(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        self.run_setup('codex', expected=1)
+        self.assertEqual(self.snapshot(), {})
+
+    def test_read_only_unset_xdg_does_not_prompt_or_write(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        for mode, expected in [('--dry-run', 0), ('--check', 1)]:
+            result = self.run_setup(mode, 'codex', expected=expected)
+            self.assertNotIn('(Enter for default)', result.stderr)
+            self.assertEqual(self.snapshot(), {})
+
+    def test_standalone_codex_uses_shared_bootstrap(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        result = subprocess.run([BASH, str(ROOT / 'codex/setup.sh')], env=self.env,
+                                input='\n', text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.home / '.codex/config.toml').is_file())
+        self.assertTrue((self.home / '.zshenv').is_file())
+
+    def test_existing_zshenv_skip_stops_modules(self):
+        path = self.home / '.zshenv'
+        path.write_text('export ORIGINAL=kept\n')
+        before = self.snapshot()
+        self.run_setup('codex', expected=1)
+        self.assertEqual(before, self.snapshot())
+
+    @unittest.skipUnless(shutil.which('zsh'), 'zsh unavailable')
+    def test_zshenv_backup_preserves_previous_behavior_and_persists_choice(self):
+        path = self.home / '.zshenv'
+        original = 'export ORIGINAL=kept\n'
+        path.write_text(original)
+        self.run_setup('gh', answers='b\n')
+        manifest = next(p for p in self.journal() if json.loads(p.read_text())['destination'] == str(path))
+        backup = Path(json.loads(manifest.read_text())['backup'])
+        self.assertEqual(backup.read_text(), original)
+        env = dict(self.env)
+        env.pop('XDG_CONFIG_HOME')
+        result = subprocess.run([shutil.which('zsh'), '-c', 'print -rl -- "$ORIGINAL" "$XDG_CONFIG_HOME" "$ZDOTDIR"'],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['kept', str(self.home / 'config'), str(self.home / 'config/zsh')])
+        self.run_setup('--rollback', answers='y\n')
+        self.assertEqual(path.read_text(), original)
+
+    def test_repo_zshenv_link_is_backed_up_without_editing_repo(self):
+        source = ROOT / 'zsh/.zshenv'
+        before = source.read_bytes()
+        path = self.home / '.zshenv'
+        path.symlink_to(source)
+        self.run_setup('gh', answers='b\n')
+        self.assertFalse(path.is_symlink())
+        self.assertEqual(source.read_bytes(), before)
+        self.run_setup('--rollback', answers='y\n')
+        self.assertEqual(os.readlink(path), str(source))
+
+    def test_modified_generated_zshenv_is_not_removed_by_rollback(self):
+        self.run_setup('gh')
+        path = self.home / '.zshenv'
+        with path.open('a') as stream:
+            stream.write('# later user change\n')
+        self.run_setup('--rollback', answers='y\n', expected=1)
+        self.assertIn('# later user change', path.read_text())
+
+    @unittest.skipUnless(shutil.which('zsh'), 'zsh unavailable')
+    def test_path_with_shell_characters_is_saved_literally(self):
+        chosen = str(self.home / "config '$HOME'")
+        self.env['XDG_CONFIG_HOME'] = chosen
+        self.run_setup('gh')
+        env = dict(self.env)
+        env.pop('XDG_CONFIG_HOME')
+        result = subprocess.run([shutil.which('zsh'), '-c', 'print -r -- "$XDG_CONFIG_HOME"'],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.rstrip('\n'), chosen)
+
+    def test_codex_skill_links_use_native_and_discovery_paths(self):
+        self.run_setup('codex')
+        for manifest in (ROOT / 'codex/skills').glob('*/SKILL.md'):
+            canonical = self.home / '.codex/skills' / manifest.parent.name
+            discovery = self.home / '.agents/skills' / manifest.parent.name
+            self.assertEqual(os.readlink(canonical), str(manifest.parent))
+            self.assertEqual(os.readlink(discovery), str(canonical))
+        self.assertFalse((self.home / '.codex/skills/README').exists())
+        before = self.snapshot()
+        self.run_setup('--check', 'codex')
+        self.run_setup('codex')
+        self.assertEqual(before, self.snapshot())
+
+    def test_missing_zsh_is_checked_for_non_zsh_modules(self):
+        (self.bin / 'zsh').unlink()
+        for name in ['bash', 'python3', 'uname', 'awk', 'dirname', 'grep', 'chmod']:
+            (self.bin / name).symlink_to(shutil.which(name))
+        self.env['PATH'] = str(self.bin)
+        result = self.run_setup('--dry-run', 'gh')
+        self.assertIn('APT would install: zsh', result.stdout)
+        self.assertEqual(self.snapshot(), {})
+        self.run_setup('gh', expected=1)
+        self.assertEqual(self.snapshot(), {})
+        self.env['TEST_CASE'] = 'install-zsh'
+        result = self.run_setup('gh', answers='y\n')
+        self.assertIn('APT: zsh', result.stdout)
+        self.assertTrue((self.home / '.zshenv').exists())
+
+    def test_invalid_prompted_xdg_path_has_no_side_effects(self):
+        self.env.pop('XDG_CONFIG_HOME')
+        self.run_setup('codex', answers='relative/path\n', expected=1)
+        self.assertEqual(self.snapshot(), {})
+
+    def test_skipped_codex_skill_conflict_does_not_create_discovery_link(self):
+        manifest = sorted((ROOT / 'codex/skills').glob('*/SKILL.md'))[0]
+        canonical = self.home / '.codex/skills' / manifest.parent.name
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text('existing user work')
+        self.run_setup('codex')
+        self.assertEqual(canonical.read_text(), 'existing user work')
+        self.assertFalse((self.home / '.agents/skills' / manifest.parent.name).exists())
+
+    def test_codex_skill_conflict_can_be_backed_up(self):
+        manifest = sorted((ROOT / 'codex/skills').glob('*/SKILL.md'))[0]
+        canonical = self.home / '.codex/skills' / manifest.parent.name
+        canonical.parent.mkdir(parents=True)
+        canonical.symlink_to(self.home / 'missing-target')
+        self.run_setup('codex', answers='b\n')
+        self.assertEqual(os.readlink(canonical), str(manifest.parent))
+        discovery = self.home / '.agents/skills' / manifest.parent.name
+        self.assertEqual(os.readlink(discovery), str(canonical))
+
     def test_first_run_and_second_run(self):
         self.run_setup('git', 'gh', 'pnpm', 'md-to-pdf', 'wezterm')
         before = self.snapshot()
@@ -144,7 +294,67 @@ esac
         self.env['PATH'] = str(self.bin)
         self.run_setup('docker', answers='y\n')
         self.assertIn('apt-get --no-upgrade --no-remove install -- docker.io docker-compose-v2', self.log.read_text())
-        self.assertEqual(self.snapshot(), {})
+        self.assertEqual((self.home / 'config/docker/config.json').read_text(), '{}\n')
+        self.assertEqual((self.home / '.docker/config.json').resolve(), self.home / 'config/docker/config.json')
+
+    def test_native_codex_and_private_docker_defaults(self):
+        self.run_setup('codex', 'docker', 'zsh')
+        self.assertFalse((self.home / '.codex').is_symlink())
+        self.assertFalse((self.home / '.codex/skills').is_symlink())
+        for name in ('config.toml', 'AGENTS.md'):
+            self.assertEqual(os.readlink(self.home / '.codex' / name), str(ROOT / 'codex' / name))
+        docker = self.home / 'config/docker/config.json'
+        self.assertFalse(docker.is_symlink())
+        self.assertEqual(docker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.home / '.docker/config.json').resolve(), docker)
+        self.assertEqual(os.readlink(self.home / '.zshrc'), str(self.home / 'config/zsh/.zshrc'))
+        before = self.snapshot()
+        self.run_setup('codex', 'docker', 'zsh')
+        self.assertEqual(before, self.snapshot())
+
+    def test_existing_codex_configuration_can_be_skipped_without_reading(self):
+        target = self.home / '.codex/config.toml'
+        target.parent.mkdir()
+        target.write_text('PRIVATE_TEST_FIXTURE')
+        result = self.run_setup('codex')
+        self.assertNotIn('PRIVATE_TEST_FIXTURE', result.stdout + result.stderr)
+        self.assertEqual(target.read_text(), 'PRIVATE_TEST_FIXTURE')
+        self.assertFalse(target.is_symlink())
+
+    def test_existing_codex_configuration_backup_and_rollback(self):
+        target = self.home / '.codex/config.toml'
+        target.parent.mkdir()
+        target.write_text('PRIVATE_TEST_FIXTURE')
+        result = self.run_setup('codex', answers='b\n')
+        self.assertNotIn('PRIVATE_TEST_FIXTURE', result.stdout + result.stderr)
+        self.assertEqual(target.resolve(), ROOT / 'codex/config.toml')
+        self.run_setup('--rollback', answers='y\n' * len(self.journal()))
+        self.assertEqual(target.read_text(), 'PRIVATE_TEST_FIXTURE')
+
+    def test_inherited_codex_override_is_not_persisted(self):
+        self.env['CODEX_HOME'] = str(self.home / 'custom codex')
+        self.env['DOCKER_CONFIG'] = str(self.home / 'custom docker')
+        self.run_setup('codex', 'docker')
+        self.assertFalse((self.home / 'custom codex').exists())
+        self.assertTrue((self.home / '.codex/config.toml').is_symlink())
+        self.assertFalse((self.home / 'config/dotfiles/environment/codex.sh').exists())
+        self.assertEqual(os.readlink(self.home / 'custom docker/config.json'), str(self.home / 'config/docker/config.json'))
+
+    def test_codex_setup_refuses_symlinked_home(self):
+        source = self.home / 'config/codex'
+        source.mkdir(parents=True)
+        (self.home / '.codex').symlink_to(source)
+        result = self.run_setup('codex', expected=1)
+        self.assertIn('symlink parent requires manual resolution', result.stderr)
+        self.assertEqual((self.home / '.codex').resolve(), source)
+        self.assertFalse((source / 'config.toml').exists())
+
+    def test_rollback_keeps_docker_private_config_and_removes_codex_links(self):
+        self.run_setup('codex', 'docker')
+        self.run_setup('--rollback', answers='y\n' * len(self.journal()))
+        self.assertTrue((self.home / 'config/docker/config.json').is_file())
+        self.assertFalse(os.path.lexists(self.home / '.codex/config.toml'))
+        self.assertTrue((ROOT / 'codex/config.toml').is_file())
 
     def test_menu_and_duplicate_module(self):
         output = self.run_setup(answers='1 1 10\n').stdout
@@ -219,7 +429,7 @@ esac
         target = self.home / 'target'
         target.write_text('original')
         args = type('Args', (), dict(source=str(ROOT / 'git/config'), destination=str(target), mode='apply',
-                                    state=str(self.home / 'state/dotfiles'), repo=str(ROOT)))()
+                                    state=str(self.home / 'state/dotfiles'), repo=str(ROOT), preserve_existing=False))()
         with patch('sys.stdin', __import__('io').StringIO('b\n')), patch.object(Path, 'symlink_to', side_effect=OSError('injected failure')):
             with self.assertRaises(OSError): files.link(args)
         self.assertEqual(target.read_text(), 'original')
@@ -261,7 +471,7 @@ esac
     def test_old_neovim_does_not_link_configuration(self):
         self.env['TEST_CASE'] = 'old-nvim'
         self.run_setup('nvim', expected=1)
-        self.assertEqual(self.snapshot(), {})
+        self.assertFalse((self.home / 'config/nvim').exists())
 
     def test_unsupported_platform(self):
         self.mock('uname')

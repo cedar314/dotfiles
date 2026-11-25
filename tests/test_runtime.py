@@ -1,5 +1,6 @@
 """Syntax/runtime smoke tests with real local binaries and isolated state."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,49 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('zsh'), 'zsh unavailable')
+    def test_zshenv_exports_paths_to_child_processes(self):
+        variables = ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME']
+        defaults = ['.config', '.local/share', '.local/state', '.cache']
+        for variant in ['unset', 'empty', 'custom']:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory(prefix='zsh-dotfiles-') as base:
+                home = Path(base) / 'home with spaces'
+                home.mkdir()
+                (home / '.zshenv').symlink_to(ROOT / 'zsh/.zshenv')
+                env = dict(os.environ, HOME=str(home))
+                env.pop('ZDOTDIR', None)
+                expected = {}
+                for variable, default in zip(variables, defaults):
+                    env.pop(variable, None)
+                    if variant == 'empty':
+                        env[variable] = ''
+                    elif variant == 'custom':
+                        env[variable] = str(home / ('custom ' + variable.lower()))
+                    expected[variable] = env.get(variable) or str(home / default)
+                expected['ZDOTDIR'] = expected['XDG_CONFIG_HOME'] + '/zsh'
+                import shlex
+                program = 'import os,json; print(json.dumps({key:os.environ[key] for key in ' + repr(list(expected)) + '}))'
+                command = 'exec ' + shlex.quote(shutil.which('python3')) + ' -c ' + shlex.quote(program)
+                result = subprocess.run([shutil.which('zsh'), '-c', command], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), expected)
+
+    @unittest.skipUnless(shutil.which('zsh'), 'zsh unavailable')
+    def test_legacy_codex_environment_fragment_is_no_longer_sourced(self):
+        with tempfile.TemporaryDirectory(prefix='codex-zsh-native-') as base:
+            home = Path(base)
+            (home / '.zshenv').symlink_to(ROOT / 'zsh/.zshenv')
+            fragment = home / '.config/dotfiles/environment/codex.sh'
+            fragment.parent.mkdir(parents=True)
+            fragment.write_text('export CODEX_HOME=/obsolete/codex\n')
+            env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / '.config'))
+            env.pop('ZDOTDIR', None)
+            env.pop('CODEX_HOME', None)
+            result = subprocess.run([shutil.which('zsh'), '-c', 'print -r -- "${CODEX_HOME-unset}"'],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), 'unset')
+
     @unittest.skipUnless(shutil.which('tmux'), 'tmux unavailable')
     def test_tmux_config_in_isolated_server(self):
         with tempfile.TemporaryDirectory(prefix='tmux-dotfiles-') as base:

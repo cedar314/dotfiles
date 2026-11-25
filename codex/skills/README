@@ -1,4 +1,7 @@
-Place only reviewed, reusable user-authored skills in NAME/SKILL.md here.
-The Codex module links each skill independently to ~/.agents/skills/NAME.
+Place reviewed, reusable user-authored skills in NAME/SKILL.md here.
+codex/setup.sh links each individual directory into ~/.codex/skills/NAME,
+then links ~/.agents/skills/NAME to that path for discovery.
+The skills directories themselves stay real so Codex can manage installed skills.
+Correct links are retained; conflicts prompt for backup or skip. A skipped
+Codex skill destination is not exposed at the discovery path.
 Do not copy bundled skills, plugin caches, project instructions, or secrets.
-No custom skills were found in the inspected user skill directory.

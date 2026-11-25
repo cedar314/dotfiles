@@ -1,6 +1,10 @@
-ensure_tool zsh - zsh || true
-link_config "$DOTFILES_ROOT/zsh/.zshenv" "$HOME/.zshenv"
+# Zsh installation and ~/.zshenv are prepared by shared initialization.
 link_config "$DOTFILES_ROOT/zsh/.zshrc" "$CONFIG_HOME/zsh/.zshrc"
+if [[ $MODE != apply && ! -f $CONFIG_HOME/zsh/.zshrc ]]; then
+    missing "Would link $HOME/.zshrc -> $CONFIG_HOME/zsh/.zshrc"
+else
+    link_config "$CONFIG_HOME/zsh/.zshrc" "$HOME/.zshrc"
+fi
 source "$DOTFILES_ROOT/zsh/versions.sh"
 # Reuse the current installation without tracking or moving it.
 if [[ -f $CONFIG_HOME/zsh/oh-my-zsh/oh-my-zsh.sh ]]; then

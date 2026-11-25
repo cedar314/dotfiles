@@ -37,8 +37,8 @@ initialize() {
     for path in "$HOME" "$CONFIG_HOME" "$DATA_HOME" "$STATE_HOME"; do
         [[ $path == /* ]] || { fail 'HOME and XDG paths must be absolute'; return 1; }
     done
-    for path in "${CODEX_HOME:-$HOME/.codex}" "${NVM_DIR:-$DATA_HOME/nvm}"; do
-        [[ $path == /* ]] || { fail 'CODEX_HOME and NVM_DIR must be absolute when set'; return 1; }
+    for path in "${NVM_DIR:-$DATA_HOME/nvm}" "${DOCKER_CONFIG:-$HOME/.docker}"; do
+        [[ $path == /* ]] || { fail 'NVM_DIR and DOCKER_CONFIG must be absolute when set'; return 1; }
     done
     kernel=$(uname -s)
     os_id=$(awk -F= '$1 == "ID" {gsub(/"/, "", $2); print $2}' /etc/os-release 2>/dev/null)
@@ -48,6 +48,21 @@ initialize() {
         PATH=/home/linuxbrew/.linuxbrew/bin:$PATH
         export PATH
     fi
+}
+bootstrap_environment() {
+    [[ ${DOTFILES_ENV_READY:-} != 1 ]] || return 0
+    ensure_tool zsh - zsh || return 1
+    local selected result=0
+    selected=$(python3 "$DOTFILES_ROOT/lib/bootstrap.py" --home "$HOME" --repo "$DOTFILES_ROOT" \
+        --state "$DOTFILES_STATE" --mode "$MODE") || result=$?
+    if (( result == 2 )) && [[ $MODE == check ]]; then
+        FAILED=1
+    elif (( result )); then
+        fail 'Shared Zsh/XDG initialization failed'
+        return 1
+    fi
+    export XDG_CONFIG_HOME="$selected"
+    CONFIG_HOME=$selected
 }
 finish() {
     if (( FAILED )); then status failed 'Some checks or operations failed'; return 1; fi
@@ -60,6 +75,38 @@ missing() {
 link_config() {
     python3 "$DOTFILES_ROOT/lib/files.py" link --source "$1" --destination "$2" \
         --repo "$DOTFILES_ROOT" --state "$DOTFILES_STATE" --mode "$MODE" || FAILED=1
+}
+# Private configs live outside the checkout. On fresh homes, seed a local copy
+# and add a conventional-path link. Never migrate or back up existing private
+# configs automatically: they may contain authentication or machine identity.
+local_config() {
+    local template=$1 canonical=$2 entrypoint=$3
+    if [[ $canonical != "$entrypoint" && ( -e $entrypoint || -L $entrypoint ) ]]; then
+        if [[ ! -L $entrypoint || $(readlink -- "$entrypoint") != "$canonical" ]]; then
+            status skipped "Existing private config retained: $entrypoint; manual migration to $canonical required"
+            return 0
+        fi
+    fi
+    if [[ -L $canonical || ( -e $canonical && ! -f $canonical ) ]]; then
+        fail "Expected an editable local config file, not a link/directory: $canonical"
+        return 1
+    elif [[ -f $canonical ]]; then
+        status 'already configured' "Local config retained: $canonical"
+    elif [[ $MODE == apply ]]; then
+        (umask 077; python3 "$DOTFILES_ROOT/lib/seed.py" "$template" "$canonical") || {
+            fail "Cannot seed private config: $canonical"; return 1;
+        }
+        status configured "Local defaults created: $canonical"
+    else
+        missing "Would create local defaults: $canonical"
+    fi
+    [[ $canonical != "$entrypoint" ]] || return 0
+    if [[ $MODE != apply && ! -f $canonical ]]; then
+        missing "Would link $entrypoint -> $canonical"
+    else
+        python3 "$DOTFILES_ROOT/lib/files.py" link --source "$canonical" --destination "$entrypoint" \
+            --repo "$DOTFILES_ROOT" --state "$DOTFILES_STATE" --mode "$MODE" --preserve-existing || FAILED=1
+    fi
 }
 privileged() {
     if (( EUID == 0 )); then "$@"; else

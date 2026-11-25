@@ -41,7 +41,10 @@ if (( ${#selected[@]} == 0 )); then
         done
     fi
 fi
-result=0
+source "$ROOT/lib/common.sh"
+parse_options "${options[@]}" && initialize && bootstrap_environment || exit 1
+export DOTFILES_ENV_READY=1
+result=$FAILED
 seen=' '
 for module in "${selected[@]}"; do
     [[ $seen != *" $module "* ]] || continue
